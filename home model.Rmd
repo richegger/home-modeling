@@ -1,0 +1,269 @@
+---
+title: "Modeling Home Sales in Reno, NV"
+author: "Rich Egger"
+date: "December 12, 2018"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+In this project we'll look at home sales in Reno, NV during 2017 and 2018.  We'll collect data from the Washoe County Assessor's office <https://www.washoecounty.us/assessor/online_data/sales_reports.php> and use their sales information for those two years.  We'll do some exploratory analysis on the data before attempting to create a predictive model for homes currently on the market.
+
+##Data Load
+
+Data on the Washoe County Assessor's website is contained within two files, one for 2017 and one for 2018.  We've downloaded them and will load each file into a separate object.  TO do this we'll use the readxl package.
+
+```{r warning = FALSE}
+library(readxl)
+```
+```{r}
+homesales2017 <- read_xlsx("Reno_2017_sales_data.xlsx")
+homesales2018 <- read_xlsx("Reno_2018_sales_data.xlsx")
+```
+
+## Data Cleanup
+
+Let's take a quick peak at the structure of our data.  We'll use 2017 as a basis for our general analysis, knowing that the same changes will have to be made to our 2018 data.  For anything specific to each file, such as missing values, we will have to evaluate both sets of data separately.
+
+```{r echo = FALSE}
+str(homesales2017)
+```
+
+The first noticeable problem is that the sales date is listed as a character string.  We'll need to transfor that to a date using the lubridate package.  Our Year Blt and Avg Yr Blt fields are fine to leave as numbers.  Finally, for ease of use we'll substitute underscores for spaces using the stringr package.
+
+```{r warning = FALSE, results = 'hide'}
+library(lubridate)
+homesales2017$'Sales Date' <- mdy(homesales2017$'Sales Date')
+homesales2018$'Sales Date' <- mdy(homesales2018$'Sales Date')
+
+library(stringr)
+salescolnames <- colnames(homesales2017)
+salescolnames <- str_replace_all(salescolnames, " ", "_")
+colnames(homesales2017) <- salescolnames
+salescolnames <- colnames(homesales2018)
+salescolnames <- str_replace_all(salescolnames, " ", "_")
+colnames(homesales2018) <- salescolnames
+```
+
+Now that we've made those changes, let's look at the types of sales that are included in these files.
+
+```{r echo = FALSE}
+table(homesales2017$BldgType)
+```
+
+It looks like this data contains sales of ***every*** sale in Washoe County, not just home sales.  We'll restrict our data to just the "Sgl Fam Res" category.  We'll need the dplyr package to make this easy.  
+
+```{r warning = FALSE, results = 'hide'}
+library(dplyr)
+hs2017SF <- homesales2017 %>% filter(BldgType == "Sgl Fam Res")
+hs2018SF <- homesales2018 %>% filter(BldgType == "Sgl Fam Res")
+```
+
+The "Neighborhood" field looks like it could be a promising addition to our dataset, but there's one problem: there are a lot of individual neighborhoods listed.
+
+```{r echo = FALSE}
+count(hs2017SF, Neighborhood)
+```
+
+Our table tells us there are 472 unique neighborhoods!  There are two things we can do.  First, the first letter of the neighborhood field tells us what general area of the county the property is located in (downtown, south Reno, University area, etc.).  Let's create a separate field for this first character called Map_Area.  Second, the first two characters tell you approximately what subarea the property is in, so neighborhoods with the same first two characters are close together.  Let's call this field N_short.
+
+This information was found with the helpful website Reno-Sparks.org <http://renosparks.org/projects/parcel-use-and-owners/> and the Washoe COunty Assessor's neighborhood information <https://www.washoecounty.us/assessor/real_property/nbc_codes.php>
+
+```{r results = 'hide'}
+hs2017SF <- hs2017SF %>% mutate(Map_Area = str_sub(hs2017SF$Neighborhood, start = 1, end = 1), N_short = str_sub(hs2017SF$Neighborhood, start = 1, end = 2))
+hs2018SF <- hs2018SF %>% mutate(Map_Area = str_sub(hs2018SF$Neighborhood, start = 1, end = 1), N_short = str_sub(hs2018SF$Neighborhood, start = 1, end = 2))
+```
+
+Let's take a look at how our sale prices are distributed via a histogram.
+
+```{r echo = FALSE}
+library(ggplot2)
+hs2017SF %>% ggplot(aes(Sale_Price)) + geom_histogram() + theme_classic()
+hs2018SF %>% ggplot(aes(Sale_Price)) + geom_histogram() + theme_classic()
+```
+
+Wow, almost all of our sales are confined within the first bucket of the histogram.  However, since there are some sales that are extremely high dollar amounts, it's not allowing us to see a really good range of the vast majority of sales.  Let's subset our data for both years to only include sales under $1M and try our histogram again.
+
+```{r results = 'hide'}
+hs2017SFM <- hs2017SF %>% filter(Sale_Price < 1000000)
+hs2018SFM <- hs2018SF %>% filter(Sale_Price < 1000000)
+```
+```{r echo = FALSE}
+hs2017SFM %>% ggplot(aes(Sale_Price)) + geom_histogram() + theme_classic()
+hs2018SFM %>% ggplot(aes(Sale_Price)) + geom_histogram() + theme_classic()
+```
+
+Both data sets look comparable, with the majority of the sales around $250000.  Let's look at what the mean and median sales price were for both years.
+
+```{r echo = FALSE}
+hs2017SFM %>% summarize(mean = mean(Sale_Price), median = median(Sale_Price))
+hs2018SFM %>% summarize(mean = mean(Sale_Price), median = median(Sale_Price))
+```
+
+Both the mean and the median have increased by $40000 each between 2017 and 2018.  Good for those homeowners selling in 2018!
+
+Let's check one more thing to get a better idea of our data, the percentage of sales based on how many bedrooms a house has.  This can be a decent indicator of house size without trying to plot out the individual square footages.
+
+```{r  echo = FALSE}
+hs2017SFM %>% ggplot(aes(x = Beds)) + geom_density()
+```
+
+At this point we are almost ready to build our model.  We want to predict the sale price of a home using the following attributes:
+
+*Square footage
+*Number of bedrooms
+*Number of bathrooms (full and half)
+*Neighborhood or relative location
+*Grade
+*Property Acreage
+
+Let's check to see if any of these fields have null or missing values.
+
+```{r echo = FALSE}
+table(is.na(hs2017SFM$Bldg_SF) | is.na(hs2017SFM$Grade) | is.na(hs2017SFM$Beds) | is.na(hs2017SFM$Full_Baths) | is.na(hs2017SFM$Half_Baths) | is.na(hs2017SFM$Acres) | is.na(hs2017SFM$Neighborhood) | is.na(hs2017SFM$Sale_Price))
+```
+
+We're lucky in that none of the predictive variables we want to use contains a null value.  The sale price does not contain null values either.  Time to build some models.
+
+##Modeling
+
+We'll build three models, one using the neighborhood, one using the N-short variable we created, and one using the Map_Area variable we created.
+
+```{r}
+modelN <- glm(Sale_Price ~ Bldg_SF + Grade + Beds + Full_Baths + Half_Baths + Acres + Neighborhood, data = hs2017SFM, family = "gaussian")
+modelshort <- glm(Sale_Price ~ Bldg_SF + Grade + Beds + Full_Baths + Half_Baths + Acres + N_short, data = hs2017SFM, family = "gaussian")
+modelmap <- glm(Sale_Price ~ Bldg_SF + Grade + Beds + Full_Baths + Half_Baths + Acres + Map_Area, data = hs2017SFM, family = "gaussian")
+```
+
+With each model created let's predict the sales price on the 2017 data to check for fit before moving on to the 2018 data.  We'll calculate the residual and RMSE of the 2017 data as well.
+
+```{r warning = FALSE}
+hs2017SFM$predictN <- predict(modelN, newdata = hs2017SFM)
+hs2017SFM$predictshort <- predict(modelshort, newdata = hs2017SFM)
+hs2017SFM$predictmap <- predict(modelmap, newdata = hs2017SFM)
+hs2017SFM$residualN <- hs2017SFM$predictN - hs2017SFM$Sale_Price
+hs2017SFM$residualshort <- hs2017SFM$predictshort - hs2017SFM$Sale_Price
+hs2017SFM$residualmap <- hs2017SFM$predictmap - hs2017SFM$Sale_Price
+```
+
+RMSE Neighborhood model:  `r as.integer(sqrt(mean(hs2017SFM$residualN ^ 2)))`
+RMSE Short model:         `r as.integer(sqrt(mean(hs2017SFM$residualshort ^ 2)))`
+RMSE Map model:           `r as.integer(sqrt(mean(hs2017SFM$residualmap ^ 2)))`
+
+The neighborhood model produces the better results.  Let's check where our RMSE was the least and the greatest by neighborhood, where the RMSE is greater than 0.  Let's also check how the model fared in the neighborhoods with the most sales.
+
+```{r echo = FALSE}
+hs2017SFM %>% group_by(Neighborhood) %>% summarize(Total_Sales = n(), RMSE = as.integer(sqrt(mean(residualN ^ 2)))) %>% arrange(desc(RMSE))
+```
+
+```{r echo = FALSE}
+hs2017SFM %>% group_by(Neighborhood) %>% summarize("Total Sales" = n(), RMSE = as.integer(sqrt(mean(residualN ^ 2)))) %>% filter(RMSE != 0) %>% arrange(RMSE)
+```
+
+```{r echo = FALSE}
+hs2017SFM %>% group_by(Neighborhood) %>% summarize(Total_Sales = n(), RMSE = as.integer(sqrt(mean(residualN ^ 2)))) %>% arrange(desc(Total_Sales))
+```
+
+```{r}
+modelN
+```
+
+This model does not seem to be a good fit.  Let's go back to a simpler model and only look at how square footage, the map area, and the number of bedrooms changes the model fit.  
+
+```{r}
+modelsimple <- glm(Sale_Price ~ Bldg_SF + Beds + Map_Area, data = hs2017SFM, family = "gaussian")
+hs2017SFM$predictsimple <- predict(modelsimple, newdata = hs2017SFM)
+hs2017SFM$residualsimple <- hs2017SFM$predictsimple - hs2017SFM$Sale_Price
+```
+
+RMSE Simple Model: `r as.integer(sqrt(mean(hs2017SFM$residualsimple ^ 2)))`
+
+```{r}
+modelsimple
+```
+
+Again, not the best.  Let's go back to our neighborhood model, which was the best of the bunch, and add in the sales date.
+
+```{r warning = FALSE}
+modeldate <- glm(Sale_Price ~ Bldg_SF + Grade + Beds + Full_Baths + Half_Baths + Acres + Neighborhood + Sales_Date, data = hs2017SFM, family = "gaussian")
+hs2017SFM$predictdate <- predict(modeldate, newdata = hs2017SFM)
+hs2017SFM$residualdate <- hs2017SFM$predictdate - hs2017SFM$Sale_Price
+```
+
+RMSE Date Model: `r as.integer(sqrt(mean(hs2017SFM$residualdate ^ 2)))`
+
+```{r}
+modeldate
+```
+
+There's one potential problem with this model: we know the sales date of our data now because the sale has already happened.  For listings on the market that are current, the sales date would be blank.  One potential way around this is to categorize the sales date as a season, and have the current listings use a potential season of the sales date.  For now, we'll leave this model alone.
+
+Maybe let's try a random forest model.
+
+```{r warning = FALSE}
+library(ranger)
+```
+```{r echo = FALSE}
+model_ranger <- ranger(Sale_Price ~ Bldg_SF + Beds + + Grade + Full_Baths + Half_Baths + Acres + Neighborhood, data = hs2017SFM, mtry = 6)
+hs2017SFM$predictranger <- model_ranger$predictions
+hs2017SFM$residualranger <- hs2017SFM$predictranger - hs2017SFM$Sale_Price
+```
+
+RMSE Forest Model: `r as.integer(sqrt(mean(hs2017SFM$residualranger ^ 2)))`
+
+This model didn't turn out any better than the previous glm models, and it fact turned out only slightly better than our shortened neighborhood model.
+
+Maybe our problem isn't the model but how we are viewing the results of the model.  Let's take our residual (predicted outcome minus the actual sale price), and view that as a percentage of the sale price.  We'll add another classification field to our data to group by sale price, then look at a boxplot of the residual percentages to see how the model performs by that grouping.
+
+```{r warning = FALSE}
+Price <- hs2017SFM$Sale_Price
+hs2017SFM$Group <- ifelse(Price < 200000, "0-200k", ifelse(Price < 400000, "200k - 400k", ifelse(Price < 600000, "400k - 600k", ifelse(Price < 800000, "600k - 800k", "800k - 1M"))))
+```
+```{r warning = FALSE}
+hs2017SFM %>% ggplot(aes(Group)) + geom_histogram(stat = "count")
+hs2017SFM$ResNPct <- abs(hs2017SFM$residualN) / hs2017SFM$Sale_Price
+hs2017SFM$ResShortPct <- abs(hs2017SFM$residualshort) / hs2017SFM$Sale_Price
+hs2017SFM$ResMapPct <- abs(hs2017SFM$residualmap) / hs2017SFM$Sale_Price
+hs2017SFM %>% group_by(Group) %>% summarize(Mean_Pct_Error = mean(ResNPct))
+hs2017SFM %>% group_by(Group) %>% summarize(Mean_Pct_Error = mean(ResShortPct))
+hs2017SFM %>% group_by(Group) %>% summarize(Mean_Pct_Error = mean(ResMapPct))
+ggplot(hs2017SFM, aes(x = Group, y = ResNPct)) + geom_boxplot()
+ggplot(hs2017SFM, aes(x = Group, y = ResShortPct)) + geom_boxplot()
+ggplot(hs2017SFM, aes(x = Group, y = ResMapPct)) + geom_boxplot()
+```
+
+The table shows us that, for the vast majority of our houses, we're off by about 8% with our Neighborhood model.  The other models have slightly higher error, going up to 10% and 11%.  Our error rate actually remains steady for any house between $200k and $800k.  Knowing that this is our error range, I believe it's something that we can live with.  Let's predict the sales price on the 2018 data using the same fields in our Neighborhood model.  We'll have to recreate the model using 2018 data, since new neighborhoods have been introduced, and the 2017 model doesn't know what to do with them.  We'll only use the Neighborhood model on the 2018 data, and not the other two main models.
+
+```{r warning = FALSE}
+modelN2018 <- glm(Sale_Price ~ Bldg_SF + Grade + Beds + Full_Baths + Half_Baths + Acres + Neighborhood, data = hs2018SFM, family = "gaussian")
+hs2018SFM$predictN <- predict(modelN2018, newdata = hs2018SFM)
+hs2018SFM$residualN <- hs2018SFM$predictN - hs2018SFM$Sale_Price
+```
+
+RMSE 2018 Data: `r as.integer(sqrt(mean(hs2018SFM$residualN ^ 2)))`
+
+We see comparably similar RMSE as to our 2017 model.
+
+```{r warning = FALSE}
+Price <- hs2018SFM$Sale_Price
+hs2018SFM$Group <- ifelse(Price < 200000, "0-200k", ifelse(Price < 400000, "200k - 400k", ifelse(Price < 600000, "400k - 600k", ifelse(Price < 800000, "600k - 800k", "800k - 1M"))))
+hs2018SFM$ResNPct <- abs(hs2018SFM$residualN) / hs2018SFM$Sale_Price
+hs2018SFM %>% ggplot(aes(Group)) + geom_histogram(stat = "count")
+hs2018SFM %>% group_by(Group) %>% summarize(Mean_Pct_Error = mean(ResNPct))
+ggplot(hs2018SFM, aes(x = Group, y = ResNPct)) + geom_boxplot()
+```
+
+Again, the majority of our sales are the $200k to $400k range, but this time with more in the $400k to $600k range than compared to 2017.  Our model performed very well and produced largely the same error percentage of 8%.  Our error was significantly larger in the $0 - $200k grouping, but with so few sales it is not surprising.
+
+Let's pick an example house and see what the models believe the pricing should be if it were sold in 2017 and in 2018.
+
+```{r warning = FALSE}
+sampleHouse <- data.frame("Bldg_SF" = 2710, "Grade" = "Excellent", "Beds" = 5, "Full_Baths" = 3, "Half_Baths" = 0, "Acres" = .12, "Neighborhood" = "EDKC")
+predict(modelN, newdata = sampleHouse)
+predict(modelN2018, newdata = sampleHouse)
+```
